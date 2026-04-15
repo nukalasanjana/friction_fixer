@@ -86,6 +86,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "REPLAY_PATCHES") {
+    const tabId = _sender.tab?.id;
+    if (!tabId) return false;
+    chrome.storage.local.get([msg.url], (stored) => {
+      const patches = stored[msg.url] || [];
+      patches.forEach(({ patch }) => {
+        chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: (patchCode) => {
+            try { eval(patchCode); } catch (e) { console.warn("[FrictionFixer] replay failed:", e); }
+          },
+          args: [patch]
+        }).catch(() => {});
+      });
+    });
+    return false;
+  }
+
   if (msg.type === "GENERATE_PATCH") {
     callOllama(msg.complaint, msg.context)
       .then(patch => sendResponse({ ok: true, patch }))
@@ -115,8 +134,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         args: [msg.patch, msg.selector]
       }).then(results => {
         const r = results?.[0]?.result ?? { ok: false, error: "Script failed" };
+        if (r.ok) {
+          // Persist the patch so it survives page refreshes
+          const url = tab.url;
+          chrome.storage.local.get([url], (stored) => {
+            const patches = stored[url] || [];
+            patches.push({ selector: msg.selector, patch: msg.patch });
+            chrome.storage.local.set({ [url]: patches });
+          });
+        }
         sendResponse(r);
       }).catch(e => sendResponse({ ok: false, error: e.message }));
+    });
+    return true;
+  }
+
+  if (msg.type === "CLEAR_PATCHES") {
+    // Remove all saved patches for the active tab's URL and reload
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+      if (!tab) return sendResponse({ ok: false, error: "No active tab" });
+      chrome.storage.local.remove(tab.url, () => {
+        chrome.tabs.reload(tab.id);
+        sendResponse({ ok: true });
+      });
     });
     return true;
   }

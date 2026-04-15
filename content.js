@@ -5,6 +5,11 @@
   if (window.__frictionFixerLoaded) return;
   window.__frictionFixerLoaded = true;
 
+  // ── Re-apply persisted patches for this URL ──────────────────────────────
+  // Ask background to replay patches via scripting.executeScript (world: MAIN)
+  // so replay runs in the same context as the original patch application.
+  chrome.runtime.sendMessage({ type: "REPLAY_PATCHES", url: window.location.href });
+
   let inspecting = false;
   let lastHighlighted = null;
 

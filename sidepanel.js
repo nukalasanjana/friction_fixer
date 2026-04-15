@@ -16,6 +16,7 @@ const btnApply     = document.getElementById("btn-apply");
 const btnDismiss   = document.getElementById("btn-dismiss");
 const btnInspector = document.getElementById("btn-inspector");
 const btnUndo      = document.getElementById("btn-undo");
+const btnReset     = document.getElementById("btn-reset");
 const complaint    = document.getElementById("complaint");
 const btnSend      = document.getElementById("btn-send");
 
@@ -224,6 +225,16 @@ function setInputEnabled(on) {
   complaint.disabled = !on;
   btnSend.disabled   = !on;
 }
+
+// ── Reset page ────────────────────────────────────────────────────────────────
+btnReset.addEventListener("click", async () => {
+  const r = await chrome.runtime.sendMessage({ type: "CLEAR_PATCHES" })
+    .catch(() => ({ ok: false, error: "Message failed" }));
+  if (!r.ok) {
+    addMsg(`Reset failed: ${r.error}`, "error");
+  }
+  // Page reloads automatically on success; no further action needed.
+});
 
 btnSend.addEventListener("click", sendComplaint);
 

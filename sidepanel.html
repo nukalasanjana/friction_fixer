@@ -336,13 +336,18 @@
     .btn-tool:hover { background: var(--border); color: var(--text); }
     .btn-tool.active { background: var(--accent); color: #ede9fe; border-color: var(--accent); }
     #btn-undo {
-      margin-left: auto;
       color: #fca5a5;
       border-color: #4d1515;
       display: none;
     }
     #btn-undo.visible { display: block; }
     #btn-undo:hover { background: #2d1515; }
+    #btn-reset {
+      margin-left: auto;
+      color: #fca5a5;
+      border-color: #4d1515;
+    }
+    #btn-reset:hover { background: #2d1515; color: #fca5a5; }
 
     /* ─ Input row ───────────────────────────── */
     .input-row {
@@ -441,6 +446,7 @@
   <div class="toolbar">
     <button class="btn-tool" id="btn-inspector">🔎 Inspector</button>
     <button class="btn-tool" id="btn-undo">↩ Undo</button>
+    <button class="btn-tool" id="btn-reset">✕ Reset Page</button>
   </div>
 
   <!-- Input -->
