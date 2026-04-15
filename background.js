@@ -16,14 +16,14 @@ async function checkOllama() {
 
 // ── Build the system prompt ──────────────────────────────────────────────────
 function buildSystemPrompt() {
-  return `You are an expert UI engineer and accessibility specialist. Your job is to fix broken or hard-to-use web UI elements by REPLACING them with better components — not just editing CSS styles.
+  return `You are an expert UI engineer and accessibility specialist. Your job is to fix broken or hard-to-use web UI elements by improving their appearance — without breaking their functionality.
 
-STRATEGY — always prefer component replacement:
-- Replace unreadable text nodes with new <span> or <p> elements with proper contrast and sizing.
-- Replace broken nav items with clear <button> or <a> elements with visible labels.
-- Replace inaccessible inputs with labeled <label>+<input> pairs.
-- Replace cluttered sections with clean, simplified equivalents.
-- Only use CSS when a full replacement is overkill (e.g., fixing a single color).
+STRATEGY — fix appearance while preserving behaviour:
+- Fix unreadable text by updating styles on the existing element or wrapping it in a new <span>/<p>.
+- Fix broken nav items by restyling the existing <a> or <button> — keep the element type.
+- Fix inaccessible inputs by adding a <label> alongside; do not replace the <input> itself.
+- Fix cluttered sections by adjusting padding, font-size, and layout on existing elements.
+- Only create a brand-new element and use replaceWith() when the tag itself is wrong AND the element has NO functional attributes (href, onclick, data-*, etc.).
 
 You MUST respond with a single valid JSON object — no markdown fences, no extra text:
 {
@@ -33,9 +33,26 @@ You MUST respond with a single valid JSON object — no markdown fences, no extr
   "patch": "EXECUTABLE JavaScript (no async/await at top level) that directly manipulates the DOM. The script runs via eval() so it must be self-contained. Use document.querySelector, createElement, replaceWith, innerHTML, etc. The script must NOT use import/export or require."
 }
 
-Rules:
+CRITICAL — never break functionality:
+- The user message will include a "Functional attributes" list. Every attribute listed there MUST appear on the patched element unchanged.
+- If you use replaceWith(), copy ALL functional attributes from the original to the new element using setAttribute().
+- NEVER remove or overwrite href, target, onclick, onchange, onsubmit, type, name, value, action, role, aria-*, or any data-* attribute.
+- For <a> elements: always keep them as <a> tags with the original href and target intact. Never convert a link to a plain <button> or <div>.
+- For elements with onclick or other inline handlers: prefer style-only edits. If you must replace, copy the handler: newEl.setAttribute('onclick', orig.getAttribute('onclick')).
+- For form controls (<input>, <select>, <textarea>): never replace the element — only add wrapping labels or adjust styles.
+- Safe replacement pattern (use this when replaceWith is needed):
+  (function() {
+    const orig = document.querySelector(SELECTOR);
+    const neo = document.createElement(TAG);
+    // copy ALL attributes first
+    for (const a of orig.attributes) neo.setAttribute(a.name, a.value);
+    // then apply visual changes
+    neo.style.XXX = YYY;
+    orig.replaceWith(neo);
+  })();
+
+Other rules:
 - patch must be pure JS that runs immediately when eval()'d in the page context.
-- Prefer creating new elements and using el.replaceWith(newEl) over style edits.
 - Keep the patch focused on the selected element and its direct children.
 - Do NOT touch unrelated parts of the page.
 - Make it fast: no setTimeout, no fetch, no external deps.`;
@@ -43,6 +60,10 @@ Rules:
 
 // ── Call Ollama ──────────────────────────────────────────────────────────────
 async function callOllama(complaint, context) {
+  const funcAttrs = context.functionalAttrs && Object.keys(context.functionalAttrs).length
+    ? Object.entries(context.functionalAttrs).map(([k, v]) => `  ${k}="${v}"`).join("\n")
+    : "  (none)";
+
   const userMessage = `
 SELECTED ELEMENT CONTEXT:
 Selector: ${context.selector}
@@ -50,6 +71,8 @@ Tag: ${context.tag}
 Text content: ${context.text}
 Outer HTML (truncated): ${context.html}
 Computed styles (key): font-size=${context.styles.fontSize}, color=${context.styles.color}, background=${context.styles.background}, display=${context.styles.display}
+Functional attributes (MUST be preserved on the patched element):
+${funcAttrs}
 
 USER COMPLAINT: ${complaint}
 

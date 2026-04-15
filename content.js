@@ -68,11 +68,33 @@
   function captureElement(el) {
     const styles = window.getComputedStyle(el);
     const html = el.outerHTML.slice(0, 1200); // truncate huge elements
+
+    // Collect functional attributes so the model knows what must be preserved
+    const FUNCTIONAL_ATTRS = [
+      "href", "target", "rel",
+      "onclick", "onchange", "onsubmit", "onmousedown", "onkeydown",
+      "type", "name", "value", "action", "method", "for",
+      "role", "aria-label", "aria-expanded", "aria-controls",
+      "data-href", "data-url", "data-action", "data-toggle", "data-target"
+    ];
+    const functionalAttrs = {};
+    FUNCTIONAL_ATTRS.forEach(attr => {
+      const val = el.getAttribute(attr);
+      if (val !== null) functionalAttrs[attr] = val;
+    });
+    // Also capture any data-* attributes not already listed
+    for (const attr of el.attributes) {
+      if (attr.name.startsWith("data-") && !(attr.name in functionalAttrs)) {
+        functionalAttrs[attr.name] = attr.value;
+      }
+    }
+
     return {
       selector: getSelector(el),
       tag: el.tagName.toLowerCase(),
       text: (el.innerText || "").slice(0, 200),
       html,
+      functionalAttrs,
       styles: {
         fontSize:   styles.fontSize,
         color:      styles.color,
