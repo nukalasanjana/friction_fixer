@@ -7,13 +7,7 @@ const contextBar   = document.getElementById("context-bar");
 const ctxText      = document.getElementById("ctx-text");
 const ctxClear     = document.getElementById("ctx-clear");
 const chat         = document.getElementById("chat");
-const patchCard    = document.getElementById("patch-card");
-const strategyPill = document.getElementById("strategy-pill");
-const cardDiag     = document.getElementById("card-diagnosis");
-const cardRat      = document.getElementById("card-rationale");
-const cardCode     = document.getElementById("card-code");
-const btnApply     = document.getElementById("btn-apply");
-const btnDismiss   = document.getElementById("btn-dismiss");
+const optionsPanel = document.getElementById("options-panel");
 const btnInspector = document.getElementById("btn-inspector");
 const btnUndo      = document.getElementById("btn-undo");
 const btnReset     = document.getElementById("btn-reset");
@@ -21,14 +15,15 @@ const complaint    = document.getElementById("complaint");
 const btnSend      = document.getElementById("btn-send");
 
 // ── State ────────────────────────────────────────────────────────────────────
-let capturedCtx  = null;   // { selector, tag, text, html, styles }
-let pendingPatch = null;   // { strategy, diagnosis, rationale, patch }
-let undoState    = null;   // { selector, original } for undo
-let busy         = false;
+let capturedCtx    = null;  // { selector, tag, text, html, styles, functionalAttrs }
+let pendingOptions = null;  // array of { label, diagnosis, patch }
+let previewState   = null;  // { index, selector, original } while a preview is live
+let undoState      = null;  // { selector, original } for post-accept undo
+let busy           = false;
 
 // ── Ollama status polling ────────────────────────────────────────────────────
 function setStatus(online) {
-  statusDot.className   = "status-dot" + (online ? "" : " offline");
+  statusDot.className    = "status-dot" + (online ? "" : " offline");
   statusLabel.textContent = online ? "Ollama online" : "Ollama offline";
 }
 
@@ -52,7 +47,7 @@ function addMsg(text, role = "assistant") {
 function addSpinner() {
   const d = document.createElement("div");
   d.className = "spinner-msg";
-  d.innerHTML = `<div class="dot-pulse"><span></span><span></span><span></span></div> Generating patch…`;
+  d.innerHTML = `<div class="dot-pulse"><span></span><span></span><span></span></div> Generating options…`;
   chat.appendChild(d);
   chat.scrollTop = chat.scrollHeight;
   return d;
@@ -79,11 +74,7 @@ ctxClear.addEventListener("click", clearContext);
 let inspecting = false;
 
 btnInspector.addEventListener("click", () => {
-  if (inspecting) {
-    stopInspecting();
-  } else {
-    startInspecting();
-  }
+  if (inspecting) stopInspecting(); else startInspecting();
 });
 
 function startInspecting() {
@@ -114,7 +105,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-// ── Send complaint → generate patch ─────────────────────────────────────────
+// ── Send complaint → generate options ────────────────────────────────────────
 async function sendComplaint() {
   const text = complaint.value.trim();
   if (!text) return;
@@ -129,8 +120,9 @@ async function sendComplaint() {
   addMsg(text, "user");
   complaint.value = "";
 
-  // Hide any existing patch card
-  hidePatchCard();
+  // Clear any existing options and revert any active preview
+  await revertPreview();
+  clearOptions();
 
   const spinner = addSpinner();
 
@@ -149,58 +141,136 @@ async function sendComplaint() {
     return;
   }
 
-  pendingPatch = r.patch;
-  showPatchCard(r.patch);
+  const options = r.patch?.options;
+  if (!Array.isArray(options) || options.length === 0) {
+    addMsg("No options returned — try rephrasing your complaint.", "error");
+    return;
+  }
+
+  showOptions(options);
 }
 
-// ── Patch card ───────────────────────────────────────────────────────────────
-function showPatchCard(patch) {
-  strategyPill.textContent  = patch.strategy || "Patch";
-  strategyPill.className    = `strategy-pill ${patch.strategy || "Conservation"}`;
-  cardDiag.textContent      = patch.diagnosis || "";
-  cardRat.textContent       = patch.rationale || "";
-  cardCode.textContent      = patch.patch || "";
-  btnApply.disabled = false;
-  patchCard.classList.add("visible");
-  chat.scrollTop = chat.scrollHeight;
+// ── Options panel ─────────────────────────────────────────────────────────────
+function showOptions(options) {
+  pendingOptions = options;
+  optionsPanel.innerHTML = "";
+
+  options.forEach((opt, i) => {
+    const card = document.createElement("div");
+    card.className = "option-card";
+    card.dataset.index = i;
+    card.innerHTML = `
+      <div class="option-header">
+        <div class="option-num">${i + 1}</div>
+        <div class="option-label">${opt.label}</div>
+      </div>
+      <div class="option-body">${opt.diagnosis}</div>
+      <div class="option-actions">
+        <button class="btn-preview" data-index="${i}">👁 Preview</button>
+        <button class="btn-accept"  data-index="${i}">✓ Apply This Fix</button>
+      </div>`;
+    optionsPanel.appendChild(card);
+  });
+
+  const footer = document.createElement("div");
+  footer.className = "options-footer";
+  footer.innerHTML = `<button class="btn-dismiss-all">Dismiss all options</button>`;
+  footer.querySelector(".btn-dismiss-all").addEventListener("click", async () => {
+    await revertPreview();
+    clearOptions();
+    addMsg("Options dismissed.", "system");
+  });
+  optionsPanel.appendChild(footer);
+
+  optionsPanel.querySelectorAll(".btn-preview").forEach(btn =>
+    btn.addEventListener("click", () => handlePreview(parseInt(btn.dataset.index)))
+  );
+  optionsPanel.querySelectorAll(".btn-accept").forEach(btn =>
+    btn.addEventListener("click", () => handleAccept(parseInt(btn.dataset.index)))
+  );
 }
 
-function hidePatchCard() {
-  patchCard.classList.remove("visible");
-  pendingPatch = null;
+function clearOptions() {
+  optionsPanel.innerHTML = "";
+  pendingOptions = null;
 }
 
-// ── Apply patch ───────────────────────────────────────────────────────────────
-btnApply.addEventListener("click", async () => {
-  if (!pendingPatch || !capturedCtx) return;
-  btnApply.disabled = true;
-  btnApply.textContent = "Applying…";
+// ── Preview logic ─────────────────────────────────────────────────────────────
+async function revertPreview() {
+  if (!previewState) return;
+  await chrome.runtime.sendMessage({
+    type:     "UNDO_PATCH",
+    selector: previewState.selector,
+    original: previewState.original
+  }).catch(() => {});
+  previewState = null;
+  // Reset all preview button states
+  optionsPanel.querySelectorAll(".btn-preview").forEach(btn => {
+    btn.textContent = "👁 Preview";
+    btn.classList.remove("active");
+    btn.disabled = false;
+  });
+  optionsPanel.querySelectorAll(".option-card").forEach(c => c.classList.remove("previewing"));
+}
 
+async function handlePreview(index) {
+  if (!pendingOptions || !capturedCtx) return;
+  const btn = optionsPanel.querySelector(`.btn-preview[data-index="${index}"]`);
+
+  // Clicking the active preview button reverts it
+  if (previewState && previewState.index === index) {
+    await revertPreview();
+    return;
+  }
+
+  // Revert any other active preview first
+  await revertPreview();
+
+  // Apply temporarily (preview: true skips storage)
   const r = await chrome.runtime.sendMessage({
     type:     "APPLY_PATCH",
-    patch:    pendingPatch.patch,
+    patch:    pendingOptions[index].patch,
+    selector: capturedCtx.selector,
+    preview:  true
+  }).catch(e => ({ ok: false, error: e.message }));
+
+  if (r.ok) {
+    previewState = { index, selector: capturedCtx.selector, original: r.original };
+    btn.textContent = "↩ Revert";
+    btn.classList.add("active");
+    optionsPanel.querySelector(`.option-card[data-index="${index}"]`).classList.add("previewing");
+    // Disable other preview buttons while one is active
+    optionsPanel.querySelectorAll(`.btn-preview:not([data-index="${index}"])`).forEach(b => b.disabled = true);
+  } else {
+    addMsg(`Preview failed: ${r.error || "unknown error"}`, "error");
+  }
+}
+
+// ── Accept logic ──────────────────────────────────────────────────────────────
+async function handleAccept(index) {
+  if (!pendingOptions || !capturedCtx) return;
+
+  // Always revert any active preview before committing
+  await revertPreview();
+
+  // Apply fresh (this call saves to storage)
+  const r = await chrome.runtime.sendMessage({
+    type:     "APPLY_PATCH",
+    patch:    pendingOptions[index].patch,
     selector: capturedCtx.selector
   }).catch(() => ({ ok: false, error: "Script injection failed" }));
 
-  btnApply.textContent = "✓ Apply Patch";
-
-  if (r.ok) {
-    // Store undo state
-    undoState = { selector: capturedCtx.selector, original: r.original };
-    btnUndo.classList.add("visible");
-    addMsg("✓ Patch applied! Click ↩ Undo if something broke.", "system");
-    hidePatchCard();
-    clearContext();
-  } else {
+  if (!r.ok) {
     addMsg(`Apply failed: ${r.error}`, "error");
-    btnApply.disabled = false;
+    return;
   }
-});
 
-btnDismiss.addEventListener("click", () => {
-  hidePatchCard();
-  addMsg("Patch dismissed.", "system");
-});
+  undoState = { selector: capturedCtx.selector, original: r.original };
+  btnUndo.classList.add("visible");
+  addMsg("✓ Fix applied! Click ↩ Undo if something broke.", "system");
+  clearOptions();
+  clearContext();
+}
 
 // ── Undo ──────────────────────────────────────────────────────────────────────
 btnUndo.addEventListener("click", async () => {

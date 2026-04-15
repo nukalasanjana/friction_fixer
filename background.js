@@ -16,46 +16,57 @@ async function checkOllama() {
 
 // ── Build the system prompt ──────────────────────────────────────────────────
 function buildSystemPrompt() {
-  return `You are an expert UI engineer and accessibility specialist. Your job is to fix broken or hard-to-use web UI elements by improving their appearance — without breaking their functionality.
-
-STRATEGY — fix appearance while preserving behaviour:
-- Fix unreadable text by updating styles on the existing element or wrapping it in a new <span>/<p>.
-- Fix broken nav items by restyling the existing <a> or <button> — keep the element type.
-- Fix inaccessible inputs by adding a <label> alongside; do not replace the <input> itself.
-- Fix cluttered sections by adjusting padding, font-size, and layout on existing elements.
-- Only create a brand-new element and use replaceWith() when the tag itself is wrong AND the element has NO functional attributes (href, onclick, data-*, etc.).
+  return `You are an expert UI engineer and accessibility specialist. Your job is to suggest fixes for broken or hard-to-use web UI elements — improving appearance without breaking functionality.
 
 You MUST respond with a single valid JSON object — no markdown fences, no extra text:
 {
-  "strategy": "Replacement" | "Simplification" | "Restructure" | "Conservation",
-  "diagnosis": "one sentence describing the UX problem",
-  "rationale": "one sentence explaining why your patch solves it",
-  "patch": "EXECUTABLE JavaScript (no async/await at top level) that directly manipulates the DOM. The script runs via eval() so it must be self-contained. Use document.querySelector, createElement, replaceWith, innerHTML, etc. The script must NOT use import/export or require."
+  "options": [
+    {
+      "label": "short human-readable name for this fix (4-7 words, e.g. 'Larger, bolder text')",
+      "diagnosis": "one sentence describing the problem and how this option solves it",
+      "patch": "EXECUTABLE JavaScript that manipulates the DOM. Runs via eval() — must be self-contained, no import/export/require, no async at top level."
+    },
+    {
+      "label": "...",
+      "diagnosis": "...",
+      "patch": "..."
+    }
+  ]
 }
 
+Provide exactly 2 options with meaningfully different visual approaches to the same complaint.
+
+MANDATORY — every patch MUST follow this exact structure, no exceptions:
+var orig = window.__ff_target;
+if (!orig) return;
+// ... your changes here, operating on orig ...
+
+ALLOWED operations on orig:
+- orig.style.X = 'Y'                          (style tweak — safest, use for option 1)
+- orig.textContent = 'new label'              (text change)
+- orig.className += ' extra-class'            (class addition)
+- orig.insertAdjacentHTML('afterend', '...')  (insert sibling)
+- var neo = orig.cloneNode(true); /* restyle neo */; orig.replaceWith(neo);  (safe replace — use for option 2)
+
+FORBIDDEN — causes errors:
+- Do NOT call document.querySelector() — use window.__ff_target (already set for you).
+- Do NOT declare a variable and then use it before that line runs.
+- Do NOT use return outside the patch body (the patch already runs inside a function).
+- Do NOT access .style or any property on a value that could be null.
+
 CRITICAL — never break functionality:
-- The user message will include a "Functional attributes" list. Every attribute listed there MUST appear on the patched element unchanged.
-- If you use replaceWith(), copy ALL functional attributes from the original to the new element using setAttribute().
-- NEVER remove or overwrite href, target, onclick, onchange, onsubmit, type, name, value, action, role, aria-*, or any data-* attribute.
-- For <a> elements: always keep them as <a> tags with the original href and target intact. Never convert a link to a plain <button> or <div>.
-- For elements with onclick or other inline handlers: prefer style-only edits. If you must replace, copy the handler: newEl.setAttribute('onclick', orig.getAttribute('onclick')).
-- For form controls (<input>, <select>, <textarea>): never replace the element — only add wrapping labels or adjust styles.
-- Safe replacement pattern (use this when replaceWith is needed):
-  (function() {
-    const orig = document.querySelector(SELECTOR);
-    const neo = document.createElement(TAG);
-    // copy ALL attributes first
-    for (const a of orig.attributes) neo.setAttribute(a.name, a.value);
-    // then apply visual changes
-    neo.style.XXX = YYY;
-    orig.replaceWith(neo);
-  })();
+- Every attribute in "Functional attributes" MUST survive unchanged on the patched element.
+- NEVER remove href, target, onclick, onchange, type, name, value, action, role, aria-*, or data-*.
+- For <a> elements: keep them as <a> with original href/target intact.
+- For form controls (<input>, <select>, <textarea>): style only, never replace.
+- Safe replace pattern (copies all attributes automatically):
+  var neo = orig.cloneNode(false);
+  neo.style.X = 'Y';
+  orig.replaceWith(neo);
 
 Other rules:
-- patch must be pure JS that runs immediately when eval()'d in the page context.
-- Keep the patch focused on the selected element and its direct children.
-- Do NOT touch unrelated parts of the page.
-- Make it fast: no setTimeout, no fetch, no external deps.`;
+- Keep each patch focused on orig and its direct children only.
+- No setTimeout, no fetch, no external deps.`;
 }
 
 // ── Call Ollama ──────────────────────────────────────────────────────────────
@@ -119,7 +130,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           target: { tabId },
           world: 'MAIN',
           func: (patchCode) => {
-            try { eval(patchCode); } catch (e) { console.warn("[FrictionFixer] replay failed:", e); }
+            try { eval(`(function(){${patchCode}})()`); } catch (e) { console.warn("[FrictionFixer] replay failed:", e); }
           },
           args: [patch]
         }).catch(() => {});
@@ -143,22 +154,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         target: { tabId: tab.id },
         world: 'MAIN',
         func: (patchCode, selector) => {
-          // Snapshot original HTML for undo
           const el = document.querySelector(selector);
-          const original = el ? el.outerHTML : null;
+          if (!el) return { ok: false, error: `Element not found: ${selector}` };
+          const original = el.outerHTML;
+          // Expose element under every name the model tends to use
+          window.__ff_target = el;
+          window.orig = el;
+          window.el = el;
           try {
+            // Wrap in IIFE so `return` statements inside patches are legal
             // eslint-disable-next-line no-eval
-            eval(patchCode);
+            eval(`(function(){${patchCode}})()`);
             return { ok: true, original };
           } catch (e) {
             return { ok: false, error: e.message };
+          } finally {
+            delete window.__ff_target;
+            delete window.orig;
+            delete window.el;
           }
         },
         args: [msg.patch, msg.selector]
       }).then(results => {
         const r = results?.[0]?.result ?? { ok: false, error: "Script failed" };
-        if (r.ok) {
-          // Persist the patch so it survives page refreshes
+        if (r.ok && !msg.preview) {
+          // Persist the patch so it survives page refreshes (skip for previews)
           const url = tab.url;
           chrome.storage.local.get([url], (stored) => {
             const patches = stored[url] || [];
